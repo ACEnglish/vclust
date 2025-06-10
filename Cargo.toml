@@ -7,9 +7,10 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0.18", features = ["derive"] }
-rust-htslib = { version = "*", default-features = false }
 chrono = "*"
+crossbeam-channel = { version = "0.5.13" }
 env_logger = "0.10.0"
-log = "0.4"
 itertools = "*"
+log = "0.4"
 logaddexp = "*"
+rust-htslib = { version = "*", default-features = false }

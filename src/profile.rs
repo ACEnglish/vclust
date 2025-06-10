@@ -1,8 +1,15 @@
-use crate::cigar::{clip, Cigar, CigarOp};
 use itertools::Itertools;
 use rust_htslib::bam::{self, IndexedReader, Record};
 
+pub type CigarOp = rust_htslib::bam::record::Cigar;
+
 pub type Region<'a> = (&'a str, i64, i64);
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Cigar {
+    pub ref_pos: i64,
+    pub ops: Vec<CigarOp>,
+}
 
 #[derive(Debug)]
 pub struct Prof {
@@ -40,59 +47,90 @@ pub fn get_profile(bam: &mut IndexedReader, region: Region) -> Result<Prof, Stri
     Ok(Prof { alts, depth })
 }
 
-fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Region) {
+pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Region) {
     assert_eq!(covs.len() as i64, region.2 - region.1);
     assert_eq!(covs.len(), alts.len());
-    let cigar = Cigar {
-        ref_pos: rec.pos(),
-        ops: rec.cigar().to_vec(),
-    };
-    let cigar = clip(&cigar, (region.1, region.2));
-    if cigar.is_none() {
-        return;
-    }
-    let cigar = cigar.unwrap();
 
-    let mut ref_pos = cigar.ref_pos as usize;
-    for op in cigar.ops {
-        if ref_pos == region.2 as usize {
+    let mut ref_pos = rec.pos();
+    let region_start = region.1;
+    let region_end = region.2;
+
+    for op in rec.cigar().iter() {
+        let op_len = get_ref_len(op);
+
+        // Skip operations entirely before the region
+        if ref_pos + op_len <= region_start {
+            ref_pos += op_len;
+            continue;
+        }
+
+        // Stop if we’re entirely past the region
+        if ref_pos >= region_end {
             break;
         }
-        let index = ref_pos - region.1 as usize;
+
+        // Determine overlap with the region
+        let clipped_start = ref_pos.max(region_start);
+        let clipped_end = (ref_pos + op_len).min(region_end);
+        let clipped_len = (clipped_end - clipped_start) as usize;
+
+        let index = (clipped_start - region_start) as usize;
+
         match op {
-            CigarOp::Match(len) | CigarOp::Equal(len) => {
-                for cov in covs.iter_mut().skip(index).take(len as usize) {
+            CigarOp::Match(_) | CigarOp::Equal(_) => {
+                for cov in covs.iter_mut().skip(index).take(clipped_len) {
                     *cov += 1;
                 }
-                ref_pos += len as usize;
             }
-            CigarOp::Diff(len) => {
-                for pos in index..index + len as usize {
-                    alts[pos] += 1;
+            CigarOp::Diff(_) => {
+                for pos in index..index + clipped_len {
                     covs[pos] += 1;
+                    alts[pos] += 1;
                 }
-                ref_pos += len as usize;
+            }
+            CigarOp::Del(_) => {
+                for pos in index..index + clipped_len {
+                    covs[pos] += 1;
+                    alts[pos] += 1;
+                }
             }
             CigarOp::Ins(len) => {
-                alts[index] += len;
-            }
-            CigarOp::Del(len) => {
-                for pos in index..index + len as usize {
-                    alts[pos] += 1;
-                    covs[pos] += 1;
+                // Insertions don't consume reference but we can still bump alt at insertion site
+                if ref_pos >= region_start && ref_pos < region_end {
+                    let idx = (ref_pos - region_start) as usize;
+                    alts[idx] += *len;
                 }
-                ref_pos += len as usize;
             }
-            CigarOp::SoftClip(_len) => {
-                alts[index] += 1; // Avoid signal spikes from long and spurious softclips
+            CigarOp::SoftClip(_) => {
+                if ref_pos >= region_start && ref_pos < region_end {
+                    let idx = (ref_pos - region_start) as usize;
+                    alts[idx] += 1;
+                }
             }
             CigarOp::HardClip(_) | CigarOp::Pad(_) | CigarOp::RefSkip(_) => {
-                panic!("Missing logic to handle {:?}", op);
+                panic!("Unexpected operation {:?}", op);
             }
         }
+
+        // Advance the reference position if this op consumes ref
+        ref_pos += match op {
+            CigarOp::Ins(_) | CigarOp::SoftClip(_) | CigarOp::HardClip(_) | CigarOp::Pad(_) => 0,
+            _ => op_len,
+        };
     }
 }
 
 fn get_mean(vals: &[u32]) -> f64 {
     vals.iter().sum::<u32>() as f64 / vals.len() as f64
+}
+
+fn get_ref_len(op: &CigarOp) -> i64 {
+    match op {
+        CigarOp::Match(len)
+        | CigarOp::RefSkip(len)
+        | CigarOp::Del(len)
+        | CigarOp::Equal(len)
+        | CigarOp::Diff(len) => *len as i64,
+        CigarOp::Ins(_) | CigarOp::SoftClip(_) | CigarOp::HardClip(_) | CigarOp::Pad(_) => 0,
+    }
 }
