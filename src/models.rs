@@ -1,4 +1,4 @@
-pub const RADIUS: i64 = 2500;
+pub const RADIUS: i64 = 500;
 pub const PRIOR_REF: f64 = 0.5779905;
 pub const PRIOR_VC: f64 = 0.4220095;
 

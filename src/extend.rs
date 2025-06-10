@@ -5,16 +5,46 @@ use itertools::Itertools;
 use logaddexp::LogAddExp;
 use rust_htslib::bam::IndexedReader;
 
-pub fn get_extension_offsets(locus: &Locus, bams: &mut Vec<IndexedReader>) -> Option<(i64, i64)> {
+pub fn get_extension_offsets(
+    locus: &Locus,
+    bams: &mut Vec<IndexedReader>,
+) -> Option<(i64, i64, i64)> {
     let region = extend_region(locus).ok()?;
 
-    let mut profs = Vec::new();
+    let mut ns = 0;
+    // let alt_minimum = 0.35;
+    let alt_depth = 5.0;
+    // Add as you go
+    let mut sum_alts: Option<Vec<f64>> = None;
+    let mut sum_depth: f64 = 0.0;
+    let mut count: usize = 0;
+
     for bam in bams {
-        let prof = get_profile(bam, region).ok()?;
-        profs.push(prof);
+        let (prof, any_alt) = get_profile(bam, region).ok()?;
+
+        if let Some(ref mut alts) = sum_alts {
+            for (sum, alt) in alts.iter_mut().zip(prof.alts.iter()) {
+                *sum += alt;
+                //any_alt |= *alt >= alt_minimum;
+            }
+        } else {
+            //any_alt |= prof.alts.iter().any(|&alt| alt >= alt_minimum);
+            sum_alts = Some(prof.alts.clone());
+        }
+        sum_depth += prof.depth;
+        count += 1;
+        if any_alt & (prof.depth >= alt_depth) {
+            ns += 1;
+        }
     }
 
-    let prof = merge(&profs);
+    let prof = if let Some(sum_alts) = sum_alts {
+        let alts = sum_alts.into_iter().map(|sum| sum / count as f64).collect();
+        let depth = sum_depth / count as f64;
+        Prof { alts, depth }
+    } else {
+        return None;
+    };
 
     if prof.depth < 5.0 || prof.depth > 150.0 {
         return None;
@@ -31,7 +61,7 @@ pub fn get_extension_offsets(locus: &Locus, bams: &mut Vec<IndexedReader>) -> Op
     let lf_offset = RADIUS - span.0;
     let rf_offset = span.1 - (RADIUS + locus.end - locus.start);
 
-    Some((lf_offset, rf_offset))
+    Some((lf_offset, rf_offset, ns))
 }
 
 fn extend_region(locus: &Locus) -> Result<(&str, i64, i64), String> {
@@ -40,18 +70,6 @@ fn extend_region(locus: &Locus) -> Result<(&str, i64, i64), String> {
     } else {
         Ok((&locus.chrom[..], locus.start - RADIUS, locus.end + RADIUS))
     }
-}
-
-fn merge(profs: &[Prof]) -> Prof {
-    let mut alts = Vec::new();
-    for pos in 0..profs.first().unwrap().alts.len() {
-        let alt = profs.iter().map(|prof| prof.alts[pos]).sum::<f64>() / profs.len() as f64;
-        alts.push(alt);
-    }
-
-    let depth = profs.iter().map(|prof| prof.depth).sum::<f64>() / profs.len() as f64;
-
-    Prof { alts, depth }
 }
 
 fn discretize(vals: &[f64]) -> Vec<u8> {

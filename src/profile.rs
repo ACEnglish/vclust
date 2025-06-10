@@ -17,19 +17,19 @@ pub struct Prof {
     pub depth: f64,
 }
 
-pub fn get_profile(bam: &mut IndexedReader, region: Region) -> Result<Prof, String> {
+pub fn get_profile(bam: &mut IndexedReader, region: Region) -> Result<(Prof, bool), String> {
     let prof_len = (region.2 - region.1) as usize;
     let mut covs = vec![0; prof_len];
     let mut alts = vec![0; prof_len];
     bam.fetch(region).map_err(|e| e.to_string())?;
-
+    let mut any_alt = 0;
     for (index, rec) in bam::Read::records(bam).enumerate() {
         let rec = rec.map_err(|e| e.to_string())?;
 
         if rec.is_secondary() || rec.is_supplementary() || rec.mapq() < 50 {
             continue;
         }
-        update_profs(rec, &mut covs, &mut alts, region);
+        any_alt += update_profs(rec, &mut covs, &mut alts, region) as usize;
 
         // Absolute max depth
         if index >= 200 {
@@ -44,17 +44,17 @@ pub fn get_profile(bam: &mut IndexedReader, region: Region) -> Result<Prof, Stri
         .map(|v| *v as f64 / depth.max(1.0))
         .collect_vec();
 
-    Ok(Prof { alts, depth })
+    Ok((Prof { alts, depth }, any_alt >= 3))
 }
 
-pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Region) {
+pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Region) -> bool {
     assert_eq!(covs.len() as i64, region.2 - region.1);
     assert_eq!(covs.len(), alts.len());
 
     let mut ref_pos = rec.pos();
     let region_start = region.1;
     let region_end = region.2;
-
+    let mut any_alt = false;
     for op in rec.cigar().iter() {
         let op_len = get_ref_len(op);
 
@@ -78,21 +78,19 @@ pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Reg
 
         match op {
             CigarOp::Match(_) | CigarOp::Equal(_) => {
-                for cov in covs.iter_mut().skip(index).take(clipped_len) {
+                let slice = &mut covs[index..index + clipped_len];
+                for cov in slice.iter_mut() {
                     *cov += 1;
                 }
             }
-            CigarOp::Diff(_) => {
-                for pos in index..index + clipped_len {
-                    covs[pos] += 1;
-                    alts[pos] += 1;
+            CigarOp::Diff(_) | CigarOp::Del(_) => {
+                let cov_slice = &mut covs[index..index + clipped_len];
+                let alt_slice = &mut alts[index..index + clipped_len];
+                for (cov, alt) in cov_slice.iter_mut().zip(alt_slice.iter_mut()) {
+                    *cov += 1;
+                    *alt += 1;
                 }
-            }
-            CigarOp::Del(_) => {
-                for pos in index..index + clipped_len {
-                    covs[pos] += 1;
-                    alts[pos] += 1;
-                }
+                any_alt |= clipped_len >= 5;
             }
             CigarOp::Ins(len) => {
                 // Insertions don't consume reference but we can still bump alt at insertion site
@@ -100,6 +98,7 @@ pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Reg
                     let idx = (ref_pos - region_start) as usize;
                     alts[idx] += *len;
                 }
+                any_alt |= clipped_len >= 5;
             }
             CigarOp::SoftClip(_) => {
                 if ref_pos >= region_start && ref_pos < region_end {
@@ -118,6 +117,8 @@ pub fn update_profs(rec: Record, covs: &mut [u32], alts: &mut [u32], region: Reg
             _ => op_len,
         };
     }
+    //Return
+    any_alt
 }
 
 fn get_mean(vals: &[u32]) -> f64 {

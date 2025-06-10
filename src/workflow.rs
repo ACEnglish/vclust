@@ -6,10 +6,10 @@ pub fn run_workflow(bams: &mut Vec<IndexedReader>, locus: &Locus) -> Result<Stri
     let in_region = format!("{}:{}-{}", locus.chrom, locus.start, locus.end);
     let offsets = get_extension_offsets(locus, bams);
 
-    if let Some((lf, rf)) = offsets {
+    if let Some((lf, rf, ns)) = offsets {
         let out_region = format!("{}:{}-{}", locus.chrom, locus.start - lf, locus.end + rf);
         Ok(format!(
-            "{}\t{in_region}\t{lf}\t{rf}\t{out_region}",
+            "{}\t{in_region}\t{lf}\t{rf}\t{out_region}\t{ns}",
             locus.name
         ))
     } else {

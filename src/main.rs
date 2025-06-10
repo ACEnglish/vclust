@@ -3,6 +3,8 @@ use clap::Parser;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use locus::{load_loci, Locus};
 use rust_htslib::bam::IndexedReader;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use workflow::run_workflow;
@@ -35,10 +37,9 @@ pub struct CliParams {
     #[clap(long = "reads")]
     #[clap(help = "BAM file with aligned HiFi reads")]
     #[clap(value_name = "READS")]
-    #[clap(value_delimiter = ' ')]
-    #[clap(num_args = 1..)]
+    #[clap(num_args = 1)]
     #[arg(value_parser = check_file_exists)]
-    pub reads_paths: Vec<PathBuf>,
+    pub reads_paths: PathBuf,
 
     #[clap(required = true)]
     #[clap(long = "regions")]
@@ -87,16 +88,32 @@ fn task_thread(
     Ok(())
 }
 
+fn read_bam_paths(file_path: PathBuf) -> std::io::Result<Vec<PathBuf>> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+
+    let mut paths = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            paths.push(PathBuf::from(line));
+        }
+    }
+
+    Ok(paths)
+}
+
 fn main() -> Result<(), String> {
     let args = CliParams::parse();
 
+    let paths = read_bam_paths(args.reads_paths).map_err(|e| e.to_string())?;
     // Create channels for communication between threads
     let (task_sender, task_receiver): (Sender<InputType>, Receiver<InputType>) = unbounded();
     let (result_sender, result_receiver): (Sender<OutputType>, Receiver<OutputType>) = unbounded();
 
     let task_handles: Vec<JoinHandle<Result<(), String>>> = (0..args.threads)
         .map(|_| {
-            let m_reads = args.reads_paths.clone();
+            let m_reads = paths.clone();
             let m_receiver = task_receiver.clone();
             let m_result_sender = result_sender.clone();
 

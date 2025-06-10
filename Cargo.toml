@@ -13,4 +13,11 @@ env_logger = "0.10.0"
 itertools = "*"
 log = "0.4"
 logaddexp = "*"
-rust-htslib = { version = "*", default-features = false }
+rust-htslib = { version = "0.46.0", default-features = false }
+
+[profile.release]
+opt-level = 3
+debug = true
+lto = true
+codegen-units = 1
+incremental = false
